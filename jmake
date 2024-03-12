@@ -1,5 +1,6 @@
 #!/usr/lib/jvm/java-21/bin/java --source 21
 // ft: java
+//  In case of debug procedure: -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005
 
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
@@ -19,8 +20,13 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -46,7 +52,6 @@ import java.util.function.ToIntFunction;
  * <p>
  * Still missing:
  * <ul>
- *   <li>Maven dependency download mechanism</li>
  *   <li>Resource file support in src/{main,test}/resources</li>
  *   <li>Integration test support</li>
  *   <li>Überjar support</li>
@@ -356,9 +361,7 @@ public class build {
 
   static class maven {
 
-    static Path localRepository() {
-      return userHome().resolve(".m2").resolve("repository");
-    }
+    static final HttpClient REMOTE_REPOSITORY = HttpClient.newHttpClient();
 
     static Dependency[] resolve(Dependency[] dependencies) {
       Set<Dependency> toResolve = new HashSet<>(Arrays.asList(dependencies));
@@ -366,7 +369,7 @@ public class build {
       while (!toResolve.isEmpty()) {
         Dependency next = toResolve.iterator().next();
         toResolve.remove(next);
-        //  TODO: ensure the JAR and the POM files have been downloaded, otherwise download them now
+        downloadIfMissing(next);
         resolved.add(next);
         for (Dependency dependency : next.pom().dependencies()) {
           if (!resolved.contains(dependency)) {
@@ -375,6 +378,42 @@ public class build {
         }
       }
       return resolved.toArray(Dependency[]::new);
+    }
+
+    static void downloadIfMissing(maven.Dependency dependency) {
+      {
+        Path localPomPath = dependency.localPomPath();
+        if (!localPomPath.toFile().isFile()) {
+          download(dependency.remotePomPath(), localPomPath);
+        }
+      }
+      {
+        Path localJarPath = dependency.localJarPath();
+        if (!localJarPath.toFile().isFile()) {
+          download(dependency.remoteJarPath(), localJarPath);
+        }
+      }
+    }
+
+    private static void download(URI remoteUri, Path localPath) {
+      System.out.printf("downloading %s ... ", remoteUri);
+      HttpRequest request = HttpRequest.newBuilder()
+                                       .GET().uri(remoteUri)
+                                       .build();
+      localPath.getParent().toFile().mkdirs();
+      try {
+        HttpResponse<Path> httpResponse = REMOTE_REPOSITORY.send(request, HttpResponse.BodyHandlers.ofFile(localPath));
+        if (httpResponse.statusCode() < 200 || 300 <= httpResponse.statusCode()) {
+          Path downloaded = httpResponse.body();
+          if (downloaded.toFile().isFile()) downloaded.toFile().delete();
+          throw new IOException("Unable to get file from server, got status " + httpResponse.statusCode());
+        }
+        System.out.printf(" ✔%n");
+      }
+      catch (IOException | InterruptedException cause) {
+        System.out.printf("failed!%n");
+        throw propagate(cause);
+      }
     }
 
     record Dependency(
@@ -423,20 +462,39 @@ public class build {
         return new Pom(localPomPath());
       }
 
+      static Path localRepository() {
+        String localRepository = buildProp("build.maven.local.repository");
+        if (localRepository == null || localRepository.isBlank()) {
+          return userHome().resolve(".m2").resolve("repository");
+        }
+        else {
+          return Paths.get(localRepository);
+        }
+      }
+
+      String relativePath(String pathSeperator, String ext) {
+        return "%2$s%1$s%3$s%1$s%4$s%1$s%3$s-%4$s.%5$s"
+          .formatted(pathSeperator, g.replaceAll("\\.", pathSeperator), a, v, ext);
+      }
+
       public Path localJarPath() {
-        return localRepository()
-          .resolve(g.replaceAll("\\.", File.separator))
-          .resolve(a)
-          .resolve(v)
-          .resolve("%s-%s.jar".formatted(a, v));
+        return localRepository().resolve(relativePath(File.separator, "jar"));
       }
 
       public Path localPomPath() {
-        return localRepository()
-          .resolve(g.replaceAll("\\.", File.separator))
-          .resolve(a)
-          .resolve(v)
-          .resolve("%s-%s.pom".formatted(a, v));
+        return localRepository().resolve(relativePath(File.separator, "pom"));
+      }
+
+      static URI remoteRepository() {
+        return URI.create("https://repo.maven.apache.org/maven2/");
+      }
+
+      public URI remoteJarPath() {
+        return remoteRepository().resolve(relativePath("/", "jar"));
+      }
+
+      public URI remotePomPath() {
+        return remoteRepository().resolve(relativePath("/", "pom"));
       }
 
     }
