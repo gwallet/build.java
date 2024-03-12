@@ -1,0 +1,685 @@
+#!/usr/lib/jvm/java-21/bin/java --source 21
+// ft: java
+
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.InputSource;
+
+import javax.xml.XMLConstants;
+import javax.xml.namespace.NamespaceContext;
+import javax.xml.xpath.XPath;
+import javax.xml.xpath.XPathConstants;
+import javax.xml.xpath.XPathExpression;
+import javax.xml.xpath.XPathExpressionException;
+import javax.xml.xpath.XPathFactory;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.IntConsumer;
+import java.util.function.IntSupplier;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import java.util.function.ToIntFunction;
+
+/**
+ * Stupid Simple Project Management facility.
+ * <p>
+ * <code>
+ * $> java build.java help
+ * </code>
+ * <p>
+ * Still missing:
+ * <ul>
+ *   <li>Maven dependency download mechanism</li>
+ *   <li>Resource file support in src/{main,test}/resources</li>
+ *   <li>Integration test support</li>
+ *   <li>Überjar support</li>
+ * </ul>
+ */
+public class build {
+
+  public static void main(String... args) {
+//    System.getenv().forEach((k, v) -> System.out.printf("env: %s = %s%n", k, v));
+//    System.getProperties().forEach((k, v) -> System.out.printf("jvm: %s = %s%n", k, v));
+
+    if (args.length < 1) {
+      execute(() -> build.usage(0), System::exit);
+    }
+    else {
+      var target = args[0];
+      switch (target) {
+        //@formatter:off
+        case        "help" -> execute(() -> build.usage(0), System::exit);
+        case     "compile" -> execute(main.compile::command, System::exit);
+        case     "package" -> execute(main.archive::command, System::exit);
+        case         "run" -> execute(main.runtime::command, System::exit, shift(args));
+        case "testCompile" -> execute(test.compile::command, System::exit);
+        case        "test" -> execute(test.runtime::command, System::exit, shift(args));
+        case       "clean" -> execute(build::clean, System::exit);
+        case null, default -> execute(() -> build.usage(1), System::exit);
+        //@formatter:on
+      }
+    }
+  }
+
+  static int usage(int exitCode) {
+    final String progname = Path.of(env("_")).getFileName().toString();
+    System.out.println(
+      """
+      NAME
+        %s — Stupid Simple Java Project Management facility.
+
+      SYNOPSIS
+        /path/to/java build.java <TARGET>
+
+      TARGETS
+        compile           — compile source files
+        run               — run the program
+        test              — execute test suite
+        package           — create JAR file
+
+        clean             — cleanup the source worktree
+        testCompile       — compile only test sources
+
+      FILES
+        assume source files in the following locations:
+
+        · src/main/java — main source files of the program
+        · src/test/java — test source files of the program test suite
+
+        all outputs are in build directory
+
+      DEPENDENCIES
+        using maven dependencies management mechanism with following classpath definition:
+
+        · main.compile    — dependencies required to compile the program
+        · main.runtime    — dependencies required to run the program,
+                            includes by default the ``main.compile`` dependencies
+        · test.compile    — dependencies required to compile test suite,
+                            includes by default the ``main.compile`` dependencies
+        · test.runtime    — dependencies required to run test suite,
+                            includes by default the ``test.compile`` dependencies
+
+        a dependencies is define by:
+        · a groupID
+        · an artifactId
+        · a version
+      """.formatted(progname)
+    );
+    return exitCode;
+  }
+
+  static int clean() {
+    try {
+      rmdir("build");
+    }
+    catch (IOException cause) {
+      throw propagate(cause);
+    }
+    return 0;
+  }
+
+  static class main {
+
+    static final Path sources = Path.of("src", "main", "java");
+    static final Path classes = Path.of("build", "main", "classes");
+
+    static class compile {
+
+      static final maven.Dependency[] dependencies = maven.Dependency.fromScope("main.compile");
+
+      static int command() {
+        return javac.compile(main.sources,
+                             main.classes,
+                             new classpath(main.compile.dependencies));
+      }
+
+    }
+
+    static class runtime {
+
+      static final String             fqClassName  = buildProp("build.main.runtime.fqClassName");
+      static final maven.Dependency[] dependencies = maven.Dependency.fromScope("main.runtime");
+
+      static int command(String... args) {
+        execute(main.archive::command, build::exitOnError);
+        return java.runJar(main.archive.name,
+                           new classpath(main.classes).append(main.compile.dependencies)
+                                                      .append(runtime.dependencies), args);
+      }
+
+    }
+
+    static class archive {
+
+      static final String name = Path.of("build")
+                                     .resolve(buildProp("build.main.jar.name"))
+                                     .toString();
+
+      static int command() {
+        execute(main.compile::command, build::exitOnError);
+        return jar.archive(main.archive.name,
+                           main.runtime.fqClassName,
+                           main.classes);
+      }
+
+    }
+
+  }
+
+  static class test {
+
+    static final Path sources = Path.of("src", "test", "java");
+    static final Path classes = Path.of("build", "test", "classes");
+
+    static class compile {
+
+      static final maven.Dependency[] dependencies = maven.Dependency.fromScope("test.compile");
+
+      static int command() {
+        execute(main.compile::command, build::exitOnError);
+        return javac.compile(test.sources,
+                             test.classes,
+                             new classpath(main.classes)
+                               .append(main.compile.dependencies)
+                               .append(test.compile.dependencies)
+        );
+      }
+
+    }
+
+    static class runtime {
+
+      static final maven.Dependency[] dependencies = maven.Dependency.fromScope("test.runtime");
+
+      static int command(String... args) {
+        if (args == null || args.length == 0) {
+          return command(
+            "execute",
+            "--fail-if-no-tests",
+            "--scan-classpath"
+          );
+        }
+        else {
+          execute(test.compile::command, build::exitOnError);
+          return java.run("org.junit.platform.console.ConsoleLauncher",
+                          new classpath(main.classes)
+                            .append(main.compile.dependencies)
+                            .append(test.classes)
+                            .append(test.compile.dependencies)
+                            .append(runtime.dependencies),
+                          args);
+        }
+      }
+
+    }
+
+  }
+
+  static class javac {
+
+    static final Path   JAVAC   = javaHome().resolve(Path.of("bin", "javac"));
+    static final String VERSION = prop("java.specification.version", () -> "21");
+
+    static int compile(Path sourcePath, Path outputDir, classpath classpath) {
+      command.line commandLine = new command.line(
+        JAVAC.toString(),
+        "--source", VERSION,
+        "--target", VERSION,
+        "--source-path", sourcePath.toString(),
+        "-classpath", classpath.toString(),
+        "-d", outputDir.toString()
+      ).append(sourceFiles(sourcePath));
+      return command.execute(commandLine, pipe(System.out), pipe(System.err));
+    }
+
+    static String[] sourceFiles(Path sourceDirectory) {
+      try (var walker = Files.walk(sourceDirectory)) {
+        return walker.filter(p -> p.getFileName().toString().matches(".*\\.java"))
+                     .map(p -> p.toFile().toString())
+                     .toArray(String[]::new);
+      }
+      catch (IOException cause) {
+        throw propagate(cause);
+      }
+    }
+
+    static String[] classFiles(Path classesDirectory) {
+      try (var walker = Files.walk(classesDirectory)) {
+        return walker.filter(p -> p.getFileName().toString().matches(".*\\.class"))
+                     .map(p -> p.toFile().toString())
+                     .map(p -> p.replaceFirst("^" + classesDirectory.toString(), ""))
+                     .toArray(String[]::new);
+      }
+      catch (IOException cause) {
+        throw propagate(cause);
+      }
+    }
+
+  }
+
+  static class jar {
+
+    static final Path JAR = javaHome().resolve(Path.of("bin", "jar"));
+
+    static int archive(String archive, String fqClassName, Path classesDirectory) {
+      command.line commandLine = new command.line(
+        JAR.toString(),
+        "--create",
+        "--file", archive,
+        "--main-class", fqClassName,
+        "-C", classesDirectory.toString()
+      ).append(javac.classFiles(classesDirectory));
+      return command.execute(commandLine, pipe(System.out), pipe(System.err));
+    }
+
+  }
+
+  static class java {
+
+    static final Path JAVA = javaHome().resolve(Path.of("bin", "java"));
+
+    static int run(String fqClassName, classpath classpath, String... args) {
+      command.line commandLine = new command.line(
+        JAVA.toString(),
+        "-classpath", classpath.toString(),
+        fqClassName
+      ).append(args);
+      return command.execute(commandLine, pipe(System.out), pipe(System.err));
+    }
+
+    static int runJar(String jarFile, classpath classpath, String... args) {
+      command.line commandLine = new command.line(
+        JAVA.toString(),
+        "-classpath", classpath.toString(),
+        "-jar", jarFile
+      ).append(args);
+      return command.execute(commandLine, pipe(System.out), pipe(System.err));
+    }
+
+  }
+
+  static class classpath {
+
+    private static final List<String> paths = new ArrayList<>();
+
+    classpath(Path... paths) {
+      this.append(paths);
+    }
+
+    classpath(String... path) {
+      this.append(path);
+    }
+
+    classpath(maven.Dependency... dependencies) {
+      this.append(dependencies);
+    }
+
+    classpath append(Path... paths) {
+      return append(Arrays.stream(paths).map(Path::toString).toArray(String[]::new));
+    }
+
+    classpath append(String... paths) {
+      this.paths.addAll(Arrays.asList(paths));
+      return this;
+    }
+
+    classpath append(maven.Dependency... dependencies) {
+      this.paths.addAll(Arrays.stream(maven.resolve(dependencies))
+                              .map(maven.Dependency::localJarPath)
+                              .map(Path::toString)
+                              .toList());
+      return this;
+    }
+
+    @Override public String toString() {
+      return String.join(":", paths);
+    }
+
+  }
+
+  static class maven {
+
+    static Path localRepository() {
+      return userHome().resolve(".m2").resolve("repository");
+    }
+
+    static Dependency[] resolve(Dependency[] dependencies) {
+      Set<Dependency> toResolve = new HashSet<>(Arrays.asList(dependencies));
+      Set<Dependency> resolved = new HashSet<>();
+      while (!toResolve.isEmpty()) {
+        Dependency next = toResolve.iterator().next();
+        toResolve.remove(next);
+        //  TODO: ensure the JAR and the POM files have been downloaded, otherwise download them now
+        resolved.add(next);
+        for (Dependency dependency : next.pom().dependencies()) {
+          if (!resolved.contains(dependency)) {
+            toResolve.add(dependency);
+          }
+        }
+      }
+      return resolved.toArray(Dependency[]::new);
+    }
+
+    record Dependency(
+      String g,
+      String a,
+      String v
+    ) {
+
+      public static Dependency[] fromScope(String scope) {
+        String dependenciesString = buildProp("build.%s.dependencies".formatted(scope));
+        String[] dependencies = dependenciesString.split("\\s");
+        ArrayList<Dependency> dependencyList = new ArrayList<>();
+        for (String dependency : dependencies) {
+          if (dependency.isBlank()) continue;
+          String[] strings = dependency.split(":");
+          dependencyList.add(new Dependency(strings[0], strings[1], strings[2]));
+        }
+        return dependencyList.toArray(Dependency[]::new);
+      }
+
+      static class Builder {
+
+        private String groupId;
+        private String artifactId;
+        private String version;
+
+        void groupId(String groupId) {
+          this.groupId = groupId;
+        }
+
+        void artifactId(String artifactId) {
+          this.artifactId = artifactId;
+        }
+
+        void version(String version) {
+          this.version = version;
+        }
+
+        Dependency build() {
+          return new Dependency(groupId, artifactId, version);
+        }
+
+      }
+
+      public Pom pom() {
+        return new Pom(localPomPath());
+      }
+
+      public Path localJarPath() {
+        return localRepository()
+          .resolve(g.replaceAll("\\.", File.separator))
+          .resolve(a)
+          .resolve(v)
+          .resolve("%s-%s.jar".formatted(a, v));
+      }
+
+      public Path localPomPath() {
+        return localRepository()
+          .resolve(g.replaceAll("\\.", File.separator))
+          .resolve(a)
+          .resolve(v)
+          .resolve("%s-%s.pom".formatted(a, v));
+      }
+
+    }
+
+    static class Pom {
+
+      static final String          NAMESPACE_URI    = "http://maven.apache.org/POM/4.0.0";
+      static final String          NAMESPACE_PREFIX = XMLConstants.DEFAULT_NS_PREFIX;
+      static final XPath           XPATH            = XPathFactory.newDefaultInstance().newXPath();
+      static final String          xpath            = "//:project/:dependencies/:dependency";
+      static final XPathExpression xPathExpression;
+
+      static {
+        XPATH.setNamespaceContext(
+          new NamespaceContext() {
+            @Override public String getNamespaceURI(String prefix) {
+              return prefix.equals(NAMESPACE_PREFIX)
+                ? NAMESPACE_URI
+                : "";
+            }
+
+            @Override public String getPrefix(String namespaceURI) {
+              return namespaceURI.equals(NAMESPACE_URI)
+                ? NAMESPACE_PREFIX
+                : "";
+            }
+
+            @Override public Iterator<String> getPrefixes(String namespaceURI) {
+              return ( namespaceURI.equals(NAMESPACE_URI)
+                ? List.of(NAMESPACE_PREFIX)
+                : List.<String>of() ).iterator();
+            }
+          }
+        );
+        try {
+          xPathExpression = XPATH.compile(xpath);
+        }
+        catch (XPathExpressionException cause) {
+          throw propagate(cause);
+        }
+      }
+
+      final InputSource source;
+
+      Pom(Path location) {
+        try {
+          source = new InputSource(new FileReader(location.toFile()));
+        }
+        catch (FileNotFoundException cause) {
+          throw propagate(cause);
+        }
+      }
+
+      Dependency[] dependencies() {
+        final NodeList nodes;
+        try {
+          nodes = (NodeList) xPathExpression.evaluate(source, XPathConstants.NODESET);
+        }
+        catch (XPathExpressionException cause) {
+          throw propagate(cause);
+        }
+        List<Dependency> dependencies = new ArrayList<>();
+        Dependency.Builder builder = new Dependency.Builder();
+        for (int i = 0; i < nodes.getLength(); i++) {
+          Node node = nodes.item(i);
+          NodeList children = node.getChildNodes();
+          for (int j = 0; j < children.getLength(); j++) {
+            Node child = children.item(j);
+            if (Node.TEXT_NODE == child.getNodeType()) continue;
+            //@formatter:off
+            if (child.getLocalName().equals("groupId"))    builder.groupId(child.getTextContent());
+            if (child.getLocalName().equals("artifactId")) builder.artifactId(child.getTextContent());
+            if (child.getLocalName().equals("version"))    builder.version(child.getTextContent());
+            //@formatter:on
+          }
+          dependencies.add(builder.build());
+        }
+        return dependencies.toArray(Dependency[]::new);
+      }
+
+    }
+
+  }
+
+  static void execute(IntSupplier command, IntConsumer exitCodeHandler) {
+    exitCodeHandler.accept(command.getAsInt());
+  }
+
+  static void execute(ToIntFunction<String[]> command, IntConsumer exitCodeHandler, String... args) {
+    exitCodeHandler.accept(command.applyAsInt(args));
+  }
+
+  static void exitOnError(int exitCode) {
+    if (exitCode != 0) {
+      System.exit(exitCode);
+    }
+  }
+
+  static Path userHome() {
+    return Path.of(prop("user.home", () -> env("HOME")));
+  }
+
+  static Path javaHome() {
+    return Path.of(prop("java.home", () -> "/usr"));
+  }
+
+  static String env(String key) {
+    if (!System.getenv().containsKey(key)) {
+      throw new IllegalStateException("$%1$s not set, please define %1$s and run again".formatted(key));
+    }
+    return System.getenv().get(key);
+  }
+
+  static String prop(String key, Supplier<String> def) {
+    return Optional.ofNullable(System.getProperty(key))
+                   .orElseGet(def);
+  }
+
+  static String buildProp(String key) {
+    return PROPERTIES.getProperty(key);
+  }
+
+  static String buildProp(String key, String def) {
+    return PROPERTIES.getProperty(key, def);
+  }
+
+  static Consumer<BufferedReader> pipe(PrintStream out) {
+    return in -> in.lines().forEachOrdered(out::println);
+  }
+
+  static class command {
+
+    static class line {
+
+      final List<String> items = new ArrayList<>();
+
+      line(String... items) {
+        append(items);
+      }
+
+      line append(String... moreItems) {
+        items.addAll(Arrays.asList(moreItems));
+        return this;
+      }
+
+      String[] toArray() {
+        return items.toArray(String[]::new);
+      }
+
+      @Override public String toString() {
+        return String.join(" ", items);
+      }
+
+    }
+
+    static int execute(line commandline) {
+      return execute(commandline, null, null);
+    }
+
+    static int execute(line commandline,
+                       Consumer<BufferedReader> stdoutConsumer,
+                       Consumer<BufferedReader> stderrConsumer) {
+      try {
+        Process process = Runtime.getRuntime().exec(commandline.toArray());
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+          System.err.printf("Run '%s', got exit code '%d'%n", commandline, exitCode);
+        }
+//      System.out.printf("Run '%s', got exit code '%d'%n", String.join(" ", commandline), exitCode);
+        try (BufferedReader stdout = new BufferedReader(new InputStreamReader(process.getInputStream()));
+             BufferedReader stderr = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
+          if (stdoutConsumer != null) {
+            stdoutConsumer.accept(stdout);
+          }
+          if (stderrConsumer != null) {
+            stderrConsumer.accept(stderr);
+          }
+        }
+        return exitCode;
+      }
+      catch (Exception cause) {
+        throw new IllegalStateException("Run %s, got unexpected error".formatted(commandline), cause);
+      }
+    }
+
+  }
+
+  static void rmdir(String directory) throws IOException {
+    Path path = Path.of(directory);
+    if (path.toFile().isDirectory()) {
+      Files.walk(path)
+           .sorted(Comparator.reverseOrder())
+           .forEachOrdered(justDo(Files::deleteIfExists));
+    }
+  }
+
+  static void rmfiles(String directory, Predicate<Path> filter) throws IOException {
+    Path path = Path.of(directory);
+    if (path.toFile().isDirectory()) {
+      Files.walk(path)
+           .sorted(Comparator.reverseOrder())
+           .filter(p -> p.toFile().isFile())
+           .filter(filter)
+           .forEachOrdered(justDo(Files::deleteIfExists));
+    }
+  }
+
+  @FunctionalInterface
+  interface IOProcedure<T> {
+
+    void accept(T input) throws IOException;
+
+  }
+
+  static <T> Consumer<T> justDo(IOProcedure<T> block) {
+    return (T input) -> {
+      try {
+        block.accept(input);
+      }
+      catch (IOException error) {
+        throw propagate(error);
+      }
+    };
+  }
+
+  static RuntimeException propagate(Throwable cause) {
+    throw new RuntimeException(cause);
+  }
+
+  static String[] shift(String[] array) {
+    String[] strings = new String[array.length - 1];
+    System.arraycopy(array, 1, strings, 0, array.length - 1);
+    return strings;
+  }
+
+  static final Properties PROPERTIES = new Properties();
+
+  static {
+    try {
+      PROPERTIES.load(new FileReader(Path.of("build.properties").toFile()));
+    }
+    catch (IOException cause) {
+      throw propagate(cause);
+    }
+  }
+}
