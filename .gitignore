@@ -1,5 +1,7 @@
 .idea/
-build/
+target/
 
+*.classes
 *.iml
-
+*.jar
+build-local.properties

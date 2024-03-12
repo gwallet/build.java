@@ -44,7 +44,7 @@ import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
 
 /**
- * Stupid Simple Project Management facility.
+ * Stupid Simple Java Build System.
  * <p>
  * <code>
  * $> java build.java help
@@ -88,10 +88,10 @@ public class build {
     System.out.println(
       """
       NAME
-        %s — Stupid Simple Java Project Management facility.
+        %1$s — Stupid Simple Java Build System.
 
       SYNOPSIS
-        /path/to/java build.java <TARGET>
+        %1$s <TARGET>
 
       TARGETS
         compile           — compile source files
@@ -105,8 +105,8 @@ public class build {
       FILES
         assume source files in the following locations:
 
-        · src/main/java — main source files of the program
-        · src/test/java — test source files of the program test suite
+        · src/main/java   — main source files of the program
+        · src/test/java   — test source files of the program test suite
 
         all outputs are in build directory
 
@@ -132,7 +132,7 @@ public class build {
 
   static int clean() {
     try {
-      rmdir("build");
+      rmdir("target");
     }
     catch (IOException cause) {
       throw propagate(cause);
@@ -143,7 +143,7 @@ public class build {
   static class main {
 
     static final Path sources = Path.of("src", "main", "java");
-    static final Path classes = Path.of("build", "main", "classes");
+    static final Path classes = Path.of("target", "main", "classes");
 
     static class compile {
 
@@ -173,7 +173,7 @@ public class build {
 
     static class archive {
 
-      static final String name = Path.of("build")
+      static final String name = Path.of("target")
                                      .resolve(buildProp("build.main.jar.name"))
                                      .toString();
 
@@ -191,7 +191,7 @@ public class build {
   static class test {
 
     static final Path sources = Path.of("src", "test", "java");
-    static final Path classes = Path.of("build", "test", "classes");
+    static final Path classes = Path.of("target", "test", "classes");
 
     static class compile {
 
@@ -735,6 +735,10 @@ public class build {
   static {
     try {
       PROPERTIES.load(new FileReader(Path.of("build.properties").toFile()));
+      File localBuildPropertiesFile = Path.of("build-local.properties").toFile();
+      if (localBuildPropertiesFile.isFile() && localBuildPropertiesFile.canRead()) {
+        PROPERTIES.load(new FileReader(localBuildPropertiesFile));
+      }
     }
     catch (IOException cause) {
       throw propagate(cause);
