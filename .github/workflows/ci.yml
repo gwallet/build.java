@@ -1,0 +1,28 @@
+name: "ci"
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔍 Check out repository code
+        uses: actions/checkout@v3
+
+      - name: 🧰 Install Java Dev Kit
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version-file: .java-version
+
+      - name: ☕ Prepare Java to be Accessible
+        run: mkdir -p /usr/lib/jvm/ && ln -s ${JAVA_HOME} /usr/lib/jvm/java-21
+
+      - name: 🧪 Execute CI
+        run: ./build test

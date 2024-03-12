@@ -1,3 +1,5 @@
+[![ci](https://github.com/gwallet/build.java/actions/workflows/ci.yml/badge.svg)](https://github.com/gwallet/build.java/actions/workflows/ci.yml)
+
 Stupid Simple Java Build System
 ===============================
 
@@ -77,7 +79,7 @@ Disclaimer
 
 This project is for educational purpose only.
 
-⚠️ DO NOT USE IN PRODUCTION ⚠️ … unless you know what you are doing.
+⚠️ **DO NOT USE IN PRODUCTION** ⚠️ … unless you know what you are doing.
 
 This is just a proof of concept:
 - yes, it's possible to replace Maven, Ant or Gradle
