@@ -1,6 +1,10 @@
-#!/usr/lib/jvm/java-21/bin/java --source 21
+#!/usr/bin/env -S java --source 21
 // ft: java
-//  In case of debug procedure: -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005
+//  In case of doubt about the JDK used:
+//    -showversion
+//
+//  In case of debug procedure:
+//    -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005
 
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
@@ -84,7 +88,7 @@ public class build {
   }
 
   static int usage(int exitCode) {
-    final String progname = Path.of(env("_")).getFileName().toString();
+    final String progname = Path.of(prop("jdk.launcher.sourcefile")).getFileName().toString();
     System.out.println(
       """
       NAME
@@ -142,12 +146,12 @@ public class build {
 
   static class main {
 
-    static final Path sources = Path.of("src", "main", "java");
-    static final Path classes = Path.of("target", "main", "classes");
+    static final Path sources = cwd().resolve(Path.of("src", "main", "java"));
+    static final Path classes = cwd().resolve(Path.of("target", "main", "classes"));
 
     static class compile {
 
-      static final maven.Dependency[] dependencies = maven.Dependency.fromScope("main.compile");
+      static final maven.dependency[] dependencies = maven.dependency.fromScope("main.compile");
 
       static int command() {
         return javac.compile(main.sources,
@@ -159,8 +163,8 @@ public class build {
 
     static class runtime {
 
-      static final String             fqClassName  = buildProp("build.main.runtime.fqClassName");
-      static final maven.Dependency[] dependencies = maven.Dependency.fromScope("main.runtime");
+      static final Optional<String>   fqClassName  = buildProp("build.main.runtime.fqClassName");
+      static final maven.dependency[] dependencies = maven.dependency.fromScope("main.runtime");
 
       static int command(String... args) {
         execute(main.archive::command, build::exitOnError);
@@ -173,14 +177,17 @@ public class build {
 
     static class archive {
 
-      static final String name = Path.of("target")
-                                     .resolve(buildProp("build.main.jar.name"))
-                                     .toString();
+      static final String name = cwd().resolve(Path.of("target")
+                                                   .resolve(buildProp("build.main.jar.name")
+                                                              .orElseGet(() -> cwd().getFileName().toString() + ".jar")))
+                                      .toString();
 
       static int command() {
         execute(main.compile::command, build::exitOnError);
+        String fqClassName = runtime.fqClassName
+          .orElseThrow(() -> new IllegalStateException("'build.main.runtime.fqClassName' is missing"));
         return jar.archive(main.archive.name,
-                           main.runtime.fqClassName,
+                           fqClassName,
                            main.classes);
       }
 
@@ -190,12 +197,12 @@ public class build {
 
   static class test {
 
-    static final Path sources = Path.of("src", "test", "java");
-    static final Path classes = Path.of("target", "test", "classes");
+    static final Path sources = cwd().resolve(Path.of("src", "test", "java"));
+    static final Path classes = cwd().resolve(Path.of("target", "test", "classes"));
 
     static class compile {
 
-      static final maven.Dependency[] dependencies = maven.Dependency.fromScope("test.compile");
+      static final maven.dependency[] dependencies = maven.dependency.fromScope("test.compile");
 
       static int command() {
         execute(main.compile::command, build::exitOnError);
@@ -211,7 +218,7 @@ public class build {
 
     static class runtime {
 
-      static final maven.Dependency[] dependencies = maven.Dependency.fromScope("test.runtime");
+      static final maven.dependency[] dependencies = maven.dependency.fromScope("test.runtime");
 
       static int command(String... args) {
         if (args == null || args.length == 0) {
@@ -239,14 +246,13 @@ public class build {
 
   static class javac {
 
-    static final Path   JAVAC   = javaHome().resolve(Path.of("bin", "javac"));
-    static final String VERSION = prop("java.specification.version", () -> "21");
+    static final Path JAVAC = java.HOME.resolve(Path.of("bin", "javac"));
 
     static int compile(Path sourcePath, Path outputDir, classpath classpath) {
       command.line commandLine = new command.line(
         JAVAC.toString(),
-        "--source", VERSION,
-        "--target", VERSION,
+        "--source", java.VERSION,
+        "--target", java.VERSION,
         "--source-path", sourcePath.toString(),
         "-classpath", classpath.toString(),
         "-d", outputDir.toString()
@@ -281,7 +287,7 @@ public class build {
 
   static class jar {
 
-    static final Path JAR = javaHome().resolve(Path.of("bin", "jar"));
+    static final Path JAR = java.HOME.resolve(Path.of("bin", "jar"));
 
     static int archive(String archive, String fqClassName, Path classesDirectory) {
       command.line commandLine = new command.line(
@@ -298,7 +304,9 @@ public class build {
 
   static class java {
 
-    static final Path JAVA = javaHome().resolve(Path.of("bin", "java"));
+    static final Path   HOME    = Path.of(prop("java.home"));
+    static final Path   JAVA    = HOME.resolve(Path.of("bin", "java"));
+    static final String VERSION = prop("java.specification.version", () -> "21");
 
     static int run(String fqClassName, classpath classpath, String... args) {
       command.line commandLine = new command.line(
@@ -332,7 +340,7 @@ public class build {
       this.append(path);
     }
 
-    classpath(maven.Dependency... dependencies) {
+    classpath(maven.dependency... dependencies) {
       this.append(dependencies);
     }
 
@@ -345,9 +353,9 @@ public class build {
       return this;
     }
 
-    classpath append(maven.Dependency... dependencies) {
+    classpath append(maven.dependency... dependencies) {
       this.paths.addAll(Arrays.stream(maven.resolve(dependencies))
-                              .map(maven.Dependency::localJarPath)
+                              .map(maven.dependency::localJarPath)
                               .map(Path::toString)
                               .toList());
       return this;
@@ -361,26 +369,27 @@ public class build {
 
   static class maven {
 
+    static final Path HOME = userHome().resolve(".m2");
     static final HttpClient REMOTE_REPOSITORY = HttpClient.newHttpClient();
 
-    static Dependency[] resolve(Dependency[] dependencies) {
-      Set<Dependency> toResolve = new HashSet<>(Arrays.asList(dependencies));
-      Set<Dependency> resolved = new HashSet<>();
+    static dependency[] resolve(dependency[] dependencies) {
+      Set<dependency> toResolve = new HashSet<>(Arrays.asList(dependencies));
+      Set<dependency> resolved = new HashSet<>();
       while (!toResolve.isEmpty()) {
-        Dependency next = toResolve.iterator().next();
+        dependency next = toResolve.iterator().next();
         toResolve.remove(next);
         downloadIfMissing(next);
         resolved.add(next);
-        for (Dependency dependency : next.pom().dependencies()) {
+        for (maven.dependency dependency : next.pom().dependencies()) {
           if (!resolved.contains(dependency)) {
             toResolve.add(dependency);
           }
         }
       }
-      return resolved.toArray(Dependency[]::new);
+      return resolved.toArray(dependency[]::new);
     }
 
-    static void downloadIfMissing(maven.Dependency dependency) {
+    static void downloadIfMissing(dependency dependency) {
       {
         Path localPomPath = dependency.localPomPath();
         if (!localPomPath.toFile().isFile()) {
@@ -416,22 +425,25 @@ public class build {
       }
     }
 
-    record Dependency(
+    record dependency(
       String g,
       String a,
       String v
     ) {
 
-      public static Dependency[] fromScope(String scope) {
-        String dependenciesString = buildProp("build.%s.dependencies".formatted(scope));
-        String[] dependencies = dependenciesString.split("\\s");
-        ArrayList<Dependency> dependencyList = new ArrayList<>();
-        for (String dependency : dependencies) {
-          if (dependency.isBlank()) continue;
-          String[] strings = dependency.split(":");
-          dependencyList.add(new Dependency(strings[0], strings[1], strings[2]));
-        }
-        return dependencyList.toArray(Dependency[]::new);
+      public static dependency[] fromScope(String scope) {
+        return buildProp("build.%s.dependencies".formatted(scope))
+          .map(dependenciesString -> {
+            String[] dependencies = dependenciesString.split("\\s");
+            ArrayList<dependency> dependencyList = new ArrayList<>();
+            for (String dependency : dependencies) {
+              if (dependency.isBlank()) continue;
+              String[] strings = dependency.split(":");
+              dependencyList.add(new dependency(strings[0], strings[1], strings[2]));
+            }
+            return dependencyList.toArray(dependency[]::new);
+          })
+          .orElseGet(() -> new dependency[0]);
       }
 
       static class Builder {
@@ -452,24 +464,20 @@ public class build {
           this.version = version;
         }
 
-        Dependency build() {
-          return new Dependency(groupId, artifactId, version);
+        dependency build() {
+          return new dependency(groupId, artifactId, version);
         }
 
       }
 
-      public Pom pom() {
-        return new Pom(localPomPath());
+      public pom pom() {
+        return new pom(localPomPath());
       }
 
       static Path localRepository() {
-        String localRepository = buildProp("build.maven.local.repository");
-        if (localRepository == null || localRepository.isBlank()) {
-          return userHome().resolve(".m2").resolve("repository");
-        }
-        else {
-          return Paths.get(localRepository);
-        }
+        return buildProp("build.maven.local.repository")
+          .map(Paths::get)
+          .orElseGet(() -> HOME.resolve("repository"));
       }
 
       String relativePath(String pathSeperator, String ext) {
@@ -499,7 +507,7 @@ public class build {
 
     }
 
-    static class Pom {
+    static class pom {
 
       static final String          NAMESPACE_URI    = "http://maven.apache.org/POM/4.0.0";
       static final String          NAMESPACE_PREFIX = XMLConstants.DEFAULT_NS_PREFIX;
@@ -539,7 +547,7 @@ public class build {
 
       final InputSource source;
 
-      Pom(Path location) {
+      pom(Path location) {
         try {
           source = new InputSource(new FileReader(location.toFile()));
         }
@@ -548,7 +556,7 @@ public class build {
         }
       }
 
-      Dependency[] dependencies() {
+      dependency[] dependencies() {
         final NodeList nodes;
         try {
           nodes = (NodeList) xPathExpression.evaluate(source, XPathConstants.NODESET);
@@ -556,8 +564,8 @@ public class build {
         catch (XPathExpressionException cause) {
           throw propagate(cause);
         }
-        List<Dependency> dependencies = new ArrayList<>();
-        Dependency.Builder builder = new Dependency.Builder();
+        List<dependency> dependencies = new ArrayList<>();
+        dependency.Builder builder = new dependency.Builder();
         for (int i = 0; i < nodes.getLength(); i++) {
           Node node = nodes.item(i);
           NodeList children = node.getChildNodes();
@@ -572,7 +580,7 @@ public class build {
           }
           dependencies.add(builder.build());
         }
-        return dependencies.toArray(Dependency[]::new);
+        return dependencies.toArray(dependency[]::new);
       }
 
     }
@@ -593,19 +601,30 @@ public class build {
     }
   }
 
-  static Path userHome() {
-    return Path.of(prop("user.home", () -> env("HOME")));
+  /**
+   * Current Working Directory.
+   *
+   * @return The directory where the build script lies.
+   */
+  static Path cwd() {
+    Path cwd = Path.of(prop("jdk.launcher.sourcefile")).getParent();
+    return ".".equals(cwd.getFileName().toString())
+      ? cwd.getParent()
+      : cwd;
   }
 
-  static Path javaHome() {
-    return Path.of(prop("java.home", () -> "/usr"));
+  static Path userHome() {
+    return Path.of(prop("user.home"));
   }
 
   static String env(String key) {
-    if (!System.getenv().containsKey(key)) {
-      throw new IllegalStateException("$%1$s not set, please define %1$s and run again".formatted(key));
-    }
-    return System.getenv().get(key);
+    return Optional.ofNullable(System.getenv().get(key))
+      .orElseThrow(() -> new IllegalStateException("${%1$s} not set, please define %1$s and run again".formatted(key)));
+  }
+
+  static String prop(String key) {
+    return Optional.ofNullable(System.getProperty(key))
+                   .orElseThrow(() -> new IllegalStateException("Can not find value of JVM property '" + key + "'"));
   }
 
   static String prop(String key, Supplier<String> def) {
@@ -613,8 +632,9 @@ public class build {
                    .orElseGet(def);
   }
 
-  static String buildProp(String key) {
-    return PROPERTIES.getProperty(key);
+  static Optional<String> buildProp(String key) {
+    return Optional.ofNullable(PROPERTIES.getProperty(key))
+                   .filter(s -> !s.isBlank());
   }
 
   static String buildProp(String key, String def) {
@@ -734,8 +754,8 @@ public class build {
 
   static {
     try {
-      PROPERTIES.load(new FileReader(Path.of("build.properties").toFile()));
-      File localBuildPropertiesFile = Path.of("build-local.properties").toFile();
+      PROPERTIES.load(new FileReader(cwd().resolve("build.properties").toFile()));
+      File localBuildPropertiesFile = cwd().resolve("build-local.properties").toFile();
       if (localBuildPropertiesFile.isFile() && localBuildPropertiesFile.canRead()) {
         PROPERTIES.load(new FileReader(localBuildPropertiesFile));
       }

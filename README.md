@@ -20,7 +20,7 @@ and running it without requiring the compilation.
 Then, a shebang can be put on top of the file to make it runnable as any (shell/perl/python/ruby) script
 
 ```java
-#!/usr/bin/java --source 11
+#!/usr/bin/env -S java --source 21
 
 public class Hello {
   public static void main(String...args) {
@@ -29,7 +29,11 @@ public class Hello {
 }
 ```
 
-Or, if one want to be more precise:
+> NOTE: be sure that the first `java` executable found in `${PATH}` has version higher or equal to the source file.
+> - works like a charm in interactive mode using [JEnv](https://github.com/jenv/jenv)
+> - works as expected in batch mode when PATH is exported like following: PATH="${JAVA_HOME}/bin:${PATH}"
+
+Or, if one want to be more precise, but less portable:
 
 ```java
 #!/usr/lib/jvm/java-21/bin/java --source 21
@@ -41,6 +45,7 @@ public class Hello {
 }
 ```
 
+> NOTE: `--source 21` is mandatory to tell the JVM to turn into script mode
 
 ### The JDK is "battery included"
 
