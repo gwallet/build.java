@@ -44,8 +44,6 @@ import java.util.SequencedSet;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 import java.util.function.IntSupplier;
-import java.util.function.Predicate;
-import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
 import java.util.stream.Stream;
 
@@ -91,7 +89,7 @@ public class build {
 
   static int usage(int exitCode) {
     final String progname = Path.of(sysProp("jdk.launcher.sourcefile")).getFileName().toString();
-    System.out.println(
+    System.out.printf(
       """
       NAME
         %1$s — Stupid Simple Java Build System.
@@ -131,14 +129,14 @@ public class build {
         · a groupID
         · an artifactId
         · a version
-      """.formatted(progname)
-    );
+      %n""",
+      progname);
     return exitCode;
   }
 
   static int clean() {
     try {
-      rmdir("target");
+      rmdir(Path.of("target"));
     }
     catch (IOException cause) {
       throw propagate(cause);
@@ -165,12 +163,14 @@ public class build {
 
     static class runtime {
 
-      static final Optional<String>   fqClassName  = buildProp("build.main.runtime.fqClassName");
+      static final String             fqClassName  = buildProp("build.main.runtime.fqClassName").orElse("");
       static final maven.dependencies dependencies = new maven.dependencies(main.compile.dependencies).scope("main.runtime");
 
       static int command(String... args) {
         execute(main.archive::command, build::exitOnError);
-        return java.runJar(main.archive.name, new classpath(main.classes).append(runtime.dependencies), args);
+        return java.runJar(main.archive.name,
+                           new classpath(main.classes).append(runtime.dependencies),
+                           args);
       }
 
     }
@@ -184,9 +184,10 @@ public class build {
 
       static int command() {
         execute(main.compile::command, build::exitOnError);
-        String fqClassName = runtime.fqClassName
-          .orElseThrow(() -> new IllegalStateException("'build.main.runtime.fqClassName' is missing"));
-        return jar.archive(main.archive.name, fqClassName, main.classes);
+        if (main.runtime.fqClassName.isBlank()) throw new IllegalStateException("'build.main.runtime.fqClassName' is missing");
+        return jar.archive(main.archive.name,
+                           main.runtime.fqClassName,
+                           main.classes);
       }
 
     }
@@ -219,6 +220,7 @@ public class build {
         if (args == null || args.length == 0) {
           return command(
             "execute",
+            "--disable-banner",
             "--fail-if-no-tests",
             "--scan-classpath"
           );
@@ -299,7 +301,7 @@ public class build {
 
     static final Path   HOME    = Path.of(sysProp("java.home"));
     static final Path   JAVA    = HOME.resolve(Path.of("bin", "java"));
-    static final String VERSION = sysProp("java.specification.version", () -> "21");
+    static final String VERSION = sysProp("java.specification.version");
 
     static int run(String fqClassName, classpath classpath, String... args) {
       command.line commandLine = new command.line(
@@ -323,14 +325,10 @@ public class build {
 
   static class classpath {
 
-    private static final List<String> paths = new ArrayList<>();
+    private final List<String> paths = new ArrayList<>();
 
     classpath(Path... paths) {
       this.append(paths);
-    }
-
-    classpath(String... path) {
-      this.append(path);
     }
 
     classpath(maven.dependencies dependencies) {
@@ -393,7 +391,9 @@ public class build {
       HttpRequest request = HttpRequest.newBuilder()
                                        .GET().uri(remoteUri)
                                        .build();
-      localPath.getParent().toFile().mkdirs();
+      if (!localPath.getParent().toFile().isDirectory() && !localPath.getParent().toFile().mkdirs()) {
+        throw new IllegalStateException("Can not create directory " + localPath.getParent());
+      }
       try {
         HttpResponse<Path> httpResponse = REMOTE_REPOSITORY.send(request, HttpResponse.BodyHandlers.ofFile(localPath));
         if (httpResponse.statusCode() < 200 || 300 <= httpResponse.statusCode()) {
@@ -492,17 +492,15 @@ public class build {
       dependencies() { /* 😉 */ }
 
       dependencies(dependencies dependencies) {
-        including(dependencies.dependencies);
+        addAll(dependencies.dependencies);
       }
 
-      dependencies including(Collection<dependency> dependencies) {
+      void addAll(Collection<dependency> dependencies) {
         this.dependencies.addAll(dependencies);
-        return this;
       }
 
-      dependencies including(dependency... dependencies) {
-        including(Arrays.asList(dependencies));
-        return this;
+      void add(dependency dependencies) {
+        this.dependencies.add(dependencies);
       }
 
       dependencies scope(String scope) {
@@ -514,7 +512,7 @@ public class build {
                                String[] strings = dependency.split(":");
                                return new dependency(strings[0], strings[1], strings[2]);
                              })
-                             .forEach(this::including));
+                             .forEach(this::add));
         return this;
       }
 
@@ -642,11 +640,6 @@ public class build {
                    .orElseThrow(() -> new IllegalStateException("Can not find value of JVM property '" + key + "'"));
   }
 
-  static String sysProp(String key, Supplier<String> def) {
-    return Optional.ofNullable(System.getProperty(key))
-                   .orElseGet(def);
-  }
-
   static Optional<String> buildProp(String key) {
     return Optional.ofNullable(PROPERTIES.getProperty(key))
                    .filter(s -> !s.isBlank());
@@ -681,20 +674,17 @@ public class build {
 
     }
 
-    static int execute(line commandline) {
-      return execute(commandline, null, null);
-    }
-
-    static int execute(line commandline,
+    static int execute(command.line commandline,
                        Consumer<BufferedReader> stdoutConsumer,
                        Consumer<BufferedReader> stderrConsumer) {
       try {
+        System.out.printf("+ %s%n", commandline);
         Process process = Runtime.getRuntime().exec(commandline.toArray());
         int exitCode = process.waitFor();
         if (exitCode != 0) {
           System.err.printf("Run '%s', got exit code '%d'%n", commandline, exitCode);
         }
-//      System.out.printf("Run '%s', got exit code '%d'%n", String.join(" ", commandline), exitCode);
+//        System.out.printf("Run '%s', got exit code '%d'%n", String.join(" ", commandline), exitCode);
         try (BufferedReader stdout = new BufferedReader(new InputStreamReader(process.getInputStream()));
              BufferedReader stderr = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
           if (stdoutConsumer != null) {
@@ -713,23 +703,12 @@ public class build {
 
   }
 
-  static void rmdir(String directory) throws IOException {
-    Path path = Path.of(directory);
+  static void rmdir(Path path) throws IOException {
     if (path.toFile().isDirectory()) {
-      Files.walk(path)
-           .sorted(Comparator.reverseOrder())
-           .forEachOrdered(justDo(Files::deleteIfExists));
-    }
-  }
-
-  static void rmfiles(String directory, Predicate<Path> filter) throws IOException {
-    Path path = Path.of(directory);
-    if (path.toFile().isDirectory()) {
-      Files.walk(path)
-           .sorted(Comparator.reverseOrder())
-           .filter(p -> p.toFile().isFile())
-           .filter(filter)
-           .forEachOrdered(justDo(Files::deleteIfExists));
+      try (var files = Files.walk(path)){
+           files.sorted(Comparator.reverseOrder()) // to look at directories content first
+                .forEachOrdered(justDo(Files::deleteIfExists));
+      }
     }
   }
 
